@@ -1,209 +1,178 @@
-import requests
 import json
-from pathlib import Path
+import pandas as pd
+import numpy as np
 
-# api docs: https://open-meteo.com/en/docs
+"""
+Przypisanie wartości danym pogodowym
 
-CAPITALS = [
-    {"country": "Polska", "city": "Warsaw", "lat": 52.2297, "lon": 21.0122, "tz": "Europe/Warsaw"},
-    {"country": "Portugal", "city": "Lisbon", "lat": 38.7223, "lon": -9.1393, "tz": "Europe/Lisbon"},
-    {"country": "Spain", "city": "Madrid", "lat": 40.4168, "lon": -3.7038, "tz": "Europe/Madrid"},
-    {"country": "France", "city": "Paris", "lat": 48.8566, "lon": 2.3522, "tz": "Europe/Paris"},
-    {"country": "Italy", "city": "Rome", "lat": 41.9028, "lon": 12.4964, "tz": "Europe/Rome"},
-    {"country": "Germany", "city": "Berlin", "lat": 52.5200, "lon": 13.4050, "tz": "Europe/Berlin"},
-    {"country": "UK", "city": "London", "lat": 51.5074, "lon": -0.1278, "tz": "Europe/London"},
-    {"country": "Ireland", "city": "Dublin", "lat": 53.3498, "lon": -6.2603, "tz": "Europe/Dublin"},
-    {"country": "Norway", "city": "Oslo", "lat": 59.9139, "lon": 10.7522, "tz": "Europe/Oslo"},
-    {"country": "Sweden", "city": "Stockholm", "lat": 59.3293, "lon": 18.0686, "tz": "Europe/Stockholm"},
-    {"country": "Finland", "city": "Helsinki", "lat": 60.1699, "lon": 24.9384, "tz": "Europe/Helsinki"},
-    {"country": "Greece", "city": "Athens", "lat": 37.9838, "lon": 23.7275, "tz": "Europe/Athens"},
-    {"country": "Japan", "city": "Tokyo", "lat": 35.6762, "lon": 139.6503, "tz": "Asia/Tokyo"},
-    {"country": "USA", "city": "Washington", "lat": 38.9072, "lon": -77.0369, "tz": "America/New_York"},
-    {"country": "Australia", "city": "Canberra", "lat": -35.2809, "lon": 149.1300, "tz": "Australia/Sydney"},
-]
+Metodologia: ranking temperatury jest zależny od pory roku na danej półkuli 
+- w zimę optimum temperatury wynosi 10 stopni, a tolerancja 8, w lato - 22 i 10,
+w inne pory roku 15 i 10. Jeśli wartość temperatury różni się od optimum o więcej 
+niż wynosi tolerancja, to wynik wynosi 0, w innych przypadkach dostaje punkty od 0 do 1.
 
-def fetch_weather_open_meteo(
-    latitude: float,                    # szerokość geograficzna
-    longitude: float,                   # długość geograficzna
-    timezone: str = "Europe/Warsaw",
-    days: int = 3                       # jako default 3 ostatnie dni, max to 16 dni
-) -> dict:
-    """
-    pobiera dane pogodowe (zwracane co godzine z każdego dnia) z Open-Meteo API
-    zwraca JSON jako słownik (dict) w Pythonie
-    """
-    url = "https://api.open-meteo.com/v1/forecast"
+Pozostałe czynniki są niezależne od pór roku:
+- dla wilgotności optimum to 50, a tolerancja wynosi 30,
+- dla prędkości wiatru optimum to 0, a tolerancja wynosi 70,
+- dla opadów optimum to 0, a tolerancja wynosi 5,
+- dla zachmurzenia optimum to 0, a tolerancja wynosi 90
+"""
 
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "hourly": [
-            "temperature_2m",
-            "relative_humidity_2m",
-            "precipitation",
-            "wind_speed_10m",
-            "cloud_cover",
-        ],
-        "forecast_days": days,
-        "timezone": timezone,
-    }
 
-    response = requests.get(url, params=params, timeout=60)
-    response.raise_for_status()
-    return response.json()
+def temperature_score_seasonal(t, month, lat):
+    north = lat >= 0
 
-def save_json(data: dict, filepath: str) -> None:
-    """
-    uwtorzenie pliku z json'em
-    """
-    path = Path(filepath)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def load_json_from_file(filepath: str) -> dict:
-    """
-    wczytanie danych z pliku (typ danych w pliku json) i zwraca dict.
-    """
-    path = Path(filepath)
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-def pretty_print_json(data: dict, max_chars: int = 3000) -> None:
-    """
-    wyswietlenie JSON w konsoli (razem z formatowaniem)
-    max_chars - ograniczenie dlugosci outputu (aby nie wyswietlic calego dlugiego pliku w konsoli)
-    """
-    text = json.dumps(data, ensure_ascii=False, indent=2)
-    if len(text) > max_chars:
-        print(text[:max_chars] + "\n... (ucięte)")
+    if north:
+        winter = [12, 1, 2]
+        summer = [6, 7, 8]
     else:
-        print(text)
+        winter = [6, 7, 8]
+        summer = [12, 1, 2]
 
-# DATA CLEANING
-def clean_hourly_data(data: dict) -> list[dict]:
-    """
-    Oczyszczanie danych godzinowych:
-    - spłaszczenie hourly JSON do listy wierszy
-    - usunięcie rekordyów, gdzie brakuje temperatury lub wilgotności (None)
-    """
-    hourly = data.get("hourly", {})
+    if month in winter:
+        optimum = 10
+        tolerance = 8
+    elif month in summer:
+        optimum = 22
+        tolerance = 10
+    else:
+        optimum = 15
+        tolerance = 10
 
-    times = hourly.get("time", [])
-    temps = hourly.get("temperature_2m", [])
-    hums = hourly.get("relative_humidity_2m", [])
-    precip = hourly.get("precipitation", [])
-    wind = hourly.get("wind_speed_10m", [])
-    cloud = hourly.get("cloud_cover", [])
+    score = 1 - abs(t - optimum) / tolerance
+    return np.clip(score, 0, 1)
 
-    rows = []
 
-    min_len = min(
-        len(times),
-        len(temps),
-        len(hums),
-        len(precip),
-        len(wind),
-        len(cloud)
-    )
+def humidity_score(h):
+    return np.clip(1 - abs(h - 50) / 30, 0, 1)
 
-    for i in range(min_len):
-        t = times[i]
-        temp = temps[i]
-        hum = hums[i]
-        pr = precip[i]
-        ws = wind[i]
-        cc = cloud[i]
 
-        # cleaning: pominięcie rekordów z brakami kluczowych danych
-        if temp is None or hum is None:
-            continue
+def wind_score(w):
+    return np.clip(1 - w / 70, 0, 1)
 
-        rows.append({
-            "time": t,
-            "temperature_2m": float(temp),
-            "relative_humidity_2m": float(hum),
-            "precipitation": None if pr is None else float(pr),
-            "wind_speed_10m": None if ws is None else float(ws),
-            "cloud_cover": None if cc is None else float(cc),
-        })
 
-    return rows
+def precipitation_score(p):
+    return 1 if p == 0 else np.clip(1 - p / 5, 0, 1)
+
+
+def cloud_score(c):
+    return np.clip(1 - c / 90, 0, 1)
+
 
 def main():
-    days = 16
-    output_folder = Path("weather_data")
+    # Wczytanie danych
+    with open("weather_data/open_meteo_all_capitals_CLEANED.json", "r", encoding="utf-8") as f:
+        raw = json.load(f)
 
-    all_data = []
+    rows = []
+    for city_block in raw["capitals_weather_cleaned"]:
+        city = city_block["metadata"]["city"]
+        country = city_block["metadata"]["country"]
 
-    for capital in CAPITALS:
-        country = capital["country"]
-        city = capital["city"]
-        lat = capital["lat"]
-        lon = capital["lon"]
-        tz = capital["tz"]
+        for i in city_block["cleaned_hourly_rows"]:
+            rows.append({
+                "city": city,
+                "country": country,
+                "latitude": city_block["metadata"]["lat"],
+                "time": i["time"],
+                "temperature": i["temperature_2m"],
+                "humidity": i["relative_humidity_2m"],
+                "precipitation": i["precipitation"],
+                "wind": i["wind_speed_10m"],
+                "clouds": i["cloud_cover"],
+                "comfort_index": None,
+            })
 
-        print(f"Pobieram: {city} ({country})...")
+    # main_table - tabela zawierająca dane pogodowe z podziałem na miasta i godziny
+    main_table = pd.DataFrame(rows)
+    main_table["time"] = pd.to_datetime(main_table["time"])
+    main_table["date"] = main_table["time"].dt.date
 
-        weather_json = fetch_weather_open_meteo(
-            latitude=lat,
-            longitude=lon,
-            timezone=tz,
-            days=days
+    # tabela zawierające średnie, maksymalne, minimalne lub sumaryczne wartości
+    # spośród 16 prognozowanych dni z podziałem na miasta
+    city_stats = (
+        main_table.groupby(["country", "city"])
+        .agg(
+            avg_temperature=("temperature", "mean"),
+            max_temperature=("temperature", "max"),
+            min_temperature=("temperature", "min"),
+
+            avg_humidity=("humidity", "mean"),
+            max_humidity=("humidity", "max"),
+            min_humidity=("humidity", "min"),
+
+            avg_wind=("wind", "mean"),
+            max_wind=("wind", "max"),
+
+            avg_precipitation=("precipitation", "mean"),
+            total_precipitation=("precipitation", "sum"),
+
+            avg_clouds=("clouds", "mean"),
         )
+        .reset_index()
+    )
+    city_stats = city_stats.round(2)
 
-        # dodanie metadata (aby łatwiej połączyć ze sobą dane)
-        weather_json["metadata"] = {
-            "country": country,
-            "city": city,
-            "lat": lat,
-            "lon": lon,
-            "timezone": tz
-        }
+    # main_table_day - kopia main_table uwzględniają tylko warunki w dzień (między 7 a 22)
+    # dalsze rankingi opierają się na tej tabeli
+    main_table_day = main_table[
+        (main_table["time"].dt.hour >= 7) &
+        (main_table["time"].dt.hour <= 22)
+        ].copy()
 
-        # zapisnie osobnego pliku dla każdego miasta
-        safe_city = city.lower().replace(" ", "_")
-        file_path = output_folder / f"open_meteo_{safe_city}.json"
-        save_json(weather_json, str(file_path))
+    # Obliczenie rankingu temperatury
+    main_table_day["temperature_score"] = main_table_day.apply(
+        lambda r: temperature_score_seasonal(
+            r["temperature"],
+            r["time"].month,
+            r["latitude"]
+        ),
+        axis=1
+    )
 
-        all_data.append(weather_json)
+    # Indeks komfortu (wagi)
+    main_table_day["comfort_index"] = (
+            0.35 * main_table_day["temperature_score"] +
+            0.20 * main_table_day["humidity"].apply(humidity_score) +
+            0.20 * main_table_day["precipitation"].apply(precipitation_score) +
+            0.15 * main_table_day["wind"].apply(wind_score) +
+            0.10 * main_table_day["clouds"].apply(cloud_score)
+    )
 
-    # zapis zbiorczy (wszystkie stolice w jednym JSON)
-    all_capitals_file = output_folder / "open_meteo_all_capitals.json"
-    save_json({"capitals_weather": all_data}, str(all_capitals_file))
+    # Agregacja do miast
+    # ranking - tabela z podziałem na miasta i średnią wartością comfort_index
+    ranking = (
+        main_table_day.groupby("city")["comfort_index"]
+        .mean()
+        .sort_values(ascending=False)
+        .reset_index()
+    )
 
-    print("\nGotowe!")
-    print(f"Pliki zapisane w folderze: {output_folder.resolve()}")
+    # daily_ranking - tabela z podziałem na miasta, dni i średnią wartością comfort_index
+    daily_ranking = (
+        main_table_day.groupby(["date", "city"])["comfort_index"]
+        .mean()
+        .reset_index()
+        .sort_values(["date", "comfort_index"], ascending=[True, False])
+    )
 
-    # odczyt danych z pliku
-    print("\nWczytuję plik zbiorczy...")
+    # top3_per_day - po 3 najlepsze miasta dla każdego dnia (uwaga - ostatni dzień z zakresu
+    # może być niemiarodajny ze względu na różne strefy czasowe)
+    top3_per_day = (
+        daily_ranking
+        .groupby("date")
+        .head(3)
+    )
 
-    loaded_all = load_json_from_file(str(all_capitals_file))
+    # best_city_per_day - miasta z najwyższą punktacją w danym dniu
+    best_city_per_day = (
+        daily_ranking
+        .groupby("date")
+        .first()
+        .reset_index()
+    )
 
-    # Podstawowe info
-    capitals_list = loaded_all.get("capitals_weather", [])
-    print(f"Liczba znalezionych miast w pliku zbiorczym: {len(capitals_list)}")
+    print()
 
-    # Podgląd fragmentu JSON
-    # print("\nPodgląd JSON (fragment z pliku zbiorczego):")
-    # pretty_print_json(loaded_all, max_chars=3000)
-
-    # CLEANING DLA WSZYSTKICH MIAST + ZAPIS DO ODDZIELNEGO PLIKU
-    cleaned_data = []
-
-    for city_data in capitals_list:
-        meta = city_data.get("metadata", {})
-        cleaned_rows = clean_hourly_data(city_data)
-
-        cleaned_data.append({
-            "metadata": meta,
-            "cleaned_hourly_rows": cleaned_rows
-        })
-
-    cleaned_file = output_folder / "open_meteo_all_capitals_CLEANED.json"
-    save_json({"capitals_weather_cleaned": cleaned_data}, str(cleaned_file))
-
-    print(f"Zapisano oczyszczone dane do pliku: {cleaned_file.resolve()}")
 
 if __name__ == "__main__":
     main()
