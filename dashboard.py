@@ -2,15 +2,14 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import json
 import pandas as pd
-import numpy as np
 from pathlib import Path
 from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import subprocess
 import sys
 from weatherDataAnalyst import calculate_all_rankings
+
 
 class WeatherDashboard:
     def __init__(self, root):
@@ -21,6 +20,7 @@ class WeatherDashboard:
         except Exception:
             self.pl_dict = {}
         self.root = root
+        self.root.state("zoomed")
         self.root.title("Weather Data Analyst Dashboard")
         self.root.geometry("1400x900")
         
@@ -40,7 +40,7 @@ class WeatherDashboard:
         self.setup_ui()
         self.on_city_changed(None)  # Załaduj pierwsze miasto
         
-        # Auto-refresh danych przy uruchomieniu (ale DOPIERO po załadowaniu UI)
+        # Auto-refresh danych przy uruchomieniu (dopiero po załadowaniu UI)
         # Opóźnij o 500ms aby UI się załadował
         self.root.after(500, self.auto_download_data)
     
@@ -56,6 +56,9 @@ class WeatherDashboard:
     
     def setup_ui(self):
         """Stwórz interfejs użytkownika"""
+        style = ttk.Style()
+        style.theme_use("alt")
+
         # Zainicjalizuj słownik dla chart frames
         self.chart_frames = {}
         self.metrics_labels = {}
@@ -204,8 +207,7 @@ class WeatherDashboard:
         except Exception as e:
             self.current_data = None
             return
-        
-        
+
         # Przygotuj dane do analizy
         rows = []
         for city_block in raw.get("capitals_weather_cleaned", []):
@@ -260,13 +262,11 @@ class WeatherDashboard:
         
         # Konwertuj do naiwnych datetime (bez timezone info)
         self.current_data["time"] = self.current_data["time"].dt.tz_localize(None).astype("datetime64[ns]")
-        
-        
+
         # Zaktualizuj metryki i wykresy
         self.update_metrics()
         self.update_charts()
-        
-    
+
     def on_period_changed(self, event):
         """Obsługa zmiany wybranego okresu"""
         if self.current_data is not None:
@@ -475,10 +475,10 @@ class WeatherDashboard:
             date_var.trace_add("write", lambda *a: update_top3_table())
             update_top3_table()
 
-            # TAB 4: Top1 dnia (best_city_per_day)
+            # TAB 4: Top 1 dnia (best_city_per_day)
             tab4 = ttk.Frame(ranking_notebook)
-            ranking_notebook.add(tab4, text="Top1 dnia")
-            desc4 = ttk.Label(tab4, text="Najlepszy dzień poszczególnych dni badanego okresu.", font=("Arial", 10), wraplength=700, justify=tk.LEFT)
+            ranking_notebook.add(tab4, text="Top 1 dnia")
+            desc4 = ttk.Label(tab4, text="Najlepsze miasta poszczególnych dni badanego okresu.", font=("Arial", 10), wraplength=700, justify=tk.LEFT)
             desc4.pack(anchor=tk.W, padx=10, pady=(10,0))
             # Polskie tłumaczenia
             best_df = rankings_data["best_city_per_day"].copy()
@@ -635,8 +635,7 @@ class WeatherDashboard:
         """Stwórz i wyświetl wykres słupkowy"""
         fig = Figure(figsize=(12, 5), dpi=100)
         ax = fig.add_subplot(111)
-        
-        # Dla danych czasowych używamy lepszej szerokości słupków
+
         x_list = list(x_data)
         if len(x_list) > 1:
             time_range = (max(x_list) - min(x_list)).total_seconds() / 86400  # dni
