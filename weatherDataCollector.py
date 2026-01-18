@@ -1,6 +1,9 @@
 import requests
 import json
 from pathlib import Path
+import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # api docs: https://open-meteo.com/en/docs
 
@@ -49,9 +52,26 @@ def fetch_weather_open_meteo(
         "timezone": timezone,
     }
 
-    response = requests.get(url, params=params, timeout=60)
-    response.raise_for_status()
-    return response.json()
+    # Setup retry strategy
+    session = requests.Session()
+    retry = Retry(
+        total=3,  # liczba prób
+        backoff_factor=1,  # czekaj 1s, 2s, 4s między próbami
+        status_forcelist=[429, 500, 502, 503, 504]
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+
+    try:
+        response = session.get(url, params=params, timeout=60)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        time.sleep(3)
+        response = session.get(url, params=params, timeout=60)
+        response.raise_for_status()
+        return response.json()
 
 
 def save_json(data: dict, filepath: str) -> None:
@@ -140,25 +160,23 @@ def main():
     days = 16
     output_folder = Path("weather_data")
 
-    all_data = []
 
-    for capital in CAPITALS:
+    # --- Równoległe pobieranie danych dla miast ---
+    import concurrent.futures
+
+
+    def fetch_clean_and_save(capital):
         country = capital["country"]
         city = capital["city"]
         lat = capital["lat"]
         lon = capital["lon"]
         tz = capital["tz"]
-
-        print(f"Pobieram: {city} ({country})...")
-
         weather_json = fetch_weather_open_meteo(
             latitude=lat,
             longitude=lon,
             timezone=tz,
             days=days
         )
-
-        # dodanie metadata (aby łatwiej połączyć ze sobą dane)
         weather_json["metadata"] = {
             "country": country,
             "city": city,
@@ -166,46 +184,32 @@ def main():
             "lon": lon,
             "timezone": tz
         }
-
-        # zapisnie osobnego pliku dla każdego miasta
         safe_city = city.lower().replace(" ", "_")
         file_path = output_folder / f"open_meteo_{safe_city}.json"
         save_json(weather_json, str(file_path))
+        cleaned_rows = clean_hourly_data(weather_json)
+        return {
+            "metadata": weather_json["metadata"],
+            "cleaned_hourly_rows": cleaned_rows
+        }, weather_json
 
-        all_data.append(weather_json)
+    cleaned_data = []
+    all_data = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        futures = [executor.submit(fetch_clean_and_save, capital) for capital in CAPITALS]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                cleaned, raw = future.result()
+                cleaned_data.append(cleaned)
+                all_data.append(raw)
+            except Exception as e:
+                print(f"Błąd pobierania miasta: {e}")
 
     # zapis zbiorczy (wszystkie stolice w jednym JSON)
     all_capitals_file = output_folder / "open_meteo_all_capitals.json"
     save_json({"capitals_weather": all_data}, str(all_capitals_file))
 
-    print("\nGotowe!")
-    print(f"Pliki zapisane w folderze: {output_folder.resolve()}")
-
-    # odczyt danych z pliku
-    print("\nWczytuję plik zbiorczy...")
-
-    loaded_all = load_json_from_file(str(all_capitals_file))
-
-    # Podstawowe info
-    capitals_list = loaded_all.get("capitals_weather", [])
-    print(f"Liczba znalezionych miast w pliku zbiorczym: {len(capitals_list)}")
-
-    # Podgląd fragmentu JSON
-    # print("\nPodgląd JSON (fragment z pliku zbiorczego):")
-    # pretty_print_json(loaded_all, max_chars=3000)
-
-    # CLEANING DLA WSZYSTKICH MIAST + ZAPIS DO ODDZIELNEGO PLIKU
-    cleaned_data = []
-
-    for city_data in capitals_list:
-        meta = city_data.get("metadata", {})
-        cleaned_rows = clean_hourly_data(city_data)
-
-        cleaned_data.append({
-            "metadata": meta,
-            "cleaned_hourly_rows": cleaned_rows
-        })
-
+    # zapis CLEANED
     cleaned_file = output_folder / "open_meteo_all_capitals_CLEANED.json"
     save_json({"capitals_weather_cleaned": cleaned_data}, str(cleaned_file))
 

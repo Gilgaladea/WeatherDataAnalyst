@@ -58,6 +58,137 @@ def cloud_score(c):
     return np.clip(1 - c / 90, 0, 1)
 
 
+def calculate_all_rankings(data_json_path):
+    """
+    Wczytaj dane z JSON i oblicz wszystkie rankingi
+    
+    Zwraca słownik z następującymi kluczami:
+    - ranking: główny ranking miast
+    - city_stats: statystyki pogodowe po miastach
+    - daily_ranking: ranking na każdy dzień
+    - top3_per_day: top 3 miasta na każdy dzień
+    - best_city_per_day: najlepsze miasto na każdy dzień
+    """
+    # Wczytanie danych
+    with open(data_json_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    rows = []
+    for city_block in raw["capitals_weather_cleaned"]:
+        city = city_block["metadata"]["city"]
+        country = city_block["metadata"]["country"]
+
+        for i in city_block["cleaned_hourly_rows"]:
+            rows.append({
+                "city": city,
+                "country": country,
+                "latitude": city_block["metadata"]["lat"],
+                "time": i["time"],
+                "temperature": i["temperature_2m"],
+                "humidity": i["relative_humidity_2m"],
+                "precipitation": i["precipitation"],
+                "wind": i["wind_speed_10m"],
+                "clouds": i["cloud_cover"],
+            })
+
+    # main_table
+    main_table = pd.DataFrame(rows)
+    main_table["time"] = pd.to_datetime(main_table["time"])
+    main_table["date"] = main_table["time"].dt.date
+
+    # Statystyki po miastach
+    city_stats = (
+        main_table.groupby(["country", "city"])
+        .agg(
+            avg_temperature=("temperature", "mean"),
+            max_temperature=("temperature", "max"),
+            min_temperature=("temperature", "min"),
+            avg_humidity=("humidity", "mean"),
+            max_humidity=("humidity", "max"),
+            min_humidity=("humidity", "min"),
+            avg_wind=("wind", "mean"),
+            max_wind=("wind", "max"),
+            avg_precipitation=("precipitation", "mean"),
+            total_precipitation=("precipitation", "sum"),
+            avg_clouds=("clouds", "mean"),
+        )
+        .reset_index()
+    )
+    city_stats = city_stats.round(2)
+
+    # main_table_day - tylko godziny dzienne (7-22)
+    main_table_day = main_table[
+        (main_table["time"].dt.hour >= 7) &
+        (main_table["time"].dt.hour <= 22)
+    ].copy()
+
+    # Obliczenie score'ów
+    main_table_day["temperature_score"] = main_table_day.apply(
+        lambda r: temperature_score_seasonal(
+            r["temperature"],
+            r["time"].month,
+            r["latitude"]
+        ),
+        axis=1
+    )
+
+    # Indeks komfortu
+    main_table_day["comfort_index"] = (
+        0.35 * main_table_day["temperature_score"] +
+        0.20 * main_table_day["humidity"].apply(humidity_score) +
+        0.20 * main_table_day["precipitation"].apply(precipitation_score) +
+        0.15 * main_table_day["wind"].apply(wind_score) +
+        0.10 * main_table_day["clouds"].apply(cloud_score)
+    )
+
+    # Główny ranking
+    ranking = (
+        main_table_day.groupby("city")["comfort_index"]
+        .mean()
+        .sort_values(ascending=False)
+        .reset_index()
+    )
+    ranking["Pozycja"] = range(1, len(ranking) + 1)
+    ranking = ranking.rename(columns={"city": "Miasto", "comfort_index": "Indeks komfortu"})
+    ranking = ranking[["Pozycja", "Miasto", "Indeks komfortu"]]
+    ranking["Indeks komfortu"] = ranking["Indeks komfortu"].round(3)
+
+    # Daily ranking
+    daily_ranking = (
+        main_table_day.groupby(["date", "city"])["comfort_index"]
+        .mean()
+        .reset_index()
+        .sort_values(["date", "comfort_index"], ascending=[True, False])
+    )
+    daily_ranking.columns = ["Data", "Miasto", "Indeks komfortu"]
+    daily_ranking["Indeks komfortu"] = daily_ranking["Indeks komfortu"].round(3)
+    daily_ranking["Data"] = daily_ranking["Data"].astype(str)
+
+    # Top 3 na dzień
+    top3_per_day = (
+        daily_ranking
+        .groupby("Data")
+        .head(3)
+        .reset_index(drop=True)
+    )
+
+    # Najlepsze miasto na dzień
+    best_city_per_day = (
+        daily_ranking
+        .groupby("Data")
+        .first()
+        .reset_index()
+    )
+
+    return {
+        "ranking": ranking,
+        "city_stats": city_stats,
+        "daily_ranking": daily_ranking,
+        "top3_per_day": top3_per_day,
+        "best_city_per_day": best_city_per_day,
+    }
+
+
 def main():
     # Wczytanie danych
     with open("weather_data/open_meteo_all_capitals_CLEANED.json", "r", encoding="utf-8") as f:
